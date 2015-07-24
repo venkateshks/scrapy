@@ -128,10 +128,14 @@ class ExecutionEngine(object):
             or self.scraper.slot.needs_backout()
 
     def _next_request_from_scheduler(self, spider):
-        slot = self.slot
-        request = slot.scheduler.next_request()
-        if not request:
-            return
+        
+        @defer.inlineCallbacks
+        def _call_scheduler_next_request(slot):
+            request = yield slot.scheduler.next_request()
+            if not request:
+                defer.returnValue(request)
+
+        d1 = _call_scheduler_next_request(self.slot)
         d = self._download(request, spider)
         d.addBoth(self._handle_downloader_output, request, spider)
         d.addErrback(lambda f: logger.info('Error while handling downloader output',
@@ -145,7 +149,7 @@ class ExecutionEngine(object):
         d.addErrback(lambda f: logger.info('Error while scheduling new request',
                                            exc_info=failure_to_exc_info(f),
                                            extra={'spider': spider}))
-        return d
+        return defer.DeferredList([d1, d])
 
     def _handle_downloader_output(self, response, request, spider):
         assert isinstance(response, (Request, Response, Failure)), response

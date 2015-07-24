@@ -131,46 +131,48 @@ class ExecutionEngine(object):
 
 
     def _next_request_from_scheduler(self, spider):
+
+        def _call_download(request):
+            d = self._download(request, spider)
+            d.addBoth(self._handle_downloader_output, request, spider)
+            d.addErrback(lambda f: logger.info('Error while handling downloader output',
+                                               exc_info=failure_to_exc_info(f),
+                                               extra={'spider': spider}))
+            d.addBoth(lambda _: slot.remove_request(request))
+            d.addErrback(lambda f: logger.info('Error while removing request from slot',
+                                               exc_info=failure_to_exc_info(f),
+                                               extra={'spider': spider}))
+            d.addBoth(lambda _: slot.nextcall.schedule())
+            d.addErrback(lambda f: logger.info('Error while scheduling new request',
+                                               exc_info=failure_to_exc_info(f),
+                                               extra={'spider': spider}))
+        return defer.DeferredList([d1, d])
+
+
+
+            
+            d = self._download(request, spider)
+            d.addBoth(self._handle_downloader_output, request, spider)
+            d.addErrback(log.msg, spider=spider)
+            d.addBoth(lambda _: slot.remove_request(request))
+            d.addErrback(log.msg, spider=spider)
+            d.addBoth(lambda _: slot.nextcall.schedule())
+            d.addErrback(log.msg, spider=spider)
+
         
         @defer.inlineCallbacks
         def _call_scheduler_next_request(slot):
             try:
                 request = yield slot.scheduler.next_request()
                 if not request:
-                    defer.returnValue(request)
+                    defer.returnValue(None)
+                defer.returnValue(_call_download(request))
             except Exception as e:
                 raise e
 
-        d1 = _call_scheduler_next_request(self.slot)
-        d = self._download(request, spider)
-        d.addBoth(self._handle_downloader_output, request, spider)
-        d.addErrback(lambda f: logger.info('Error while handling downloader output',
-                                           exc_info=failure_to_exc_info(f),
-                                           extra={'spider': spider}))
-        d.addBoth(lambda _: slot.remove_request(request))
-        d.addErrback(lambda f: logger.info('Error while removing request from slot',
-                                           exc_info=failure_to_exc_info(f),
-                                           extra={'spider': spider}))
-        d.addBoth(lambda _: slot.nextcall.schedule())
-        d.addErrback(lambda f: logger.info('Error while scheduling new request',
-                                           exc_info=failure_to_exc_info(f),
-                                           extra={'spider': spider}))
-        return defer.DeferredList([d1, d])
+ 
+        return _call_scheduler_next_request(self.slot)
 
-    
-    def _next_request_from_scheduler(self, spider):
-        slot = self.slot
-        request = slot.scheduler.next_request()
-        if not request:
-            return
-        d = self._download(request, spider)
-        d.addBoth(self._handle_downloader_output, request, spider)
-        d.addErrback(log.msg, spider=spider)
-        d.addBoth(lambda _: slot.remove_request(request))
-        d.addErrback(log.msg, spider=spider)
-        d.addBoth(lambda _: slot.nextcall.schedule())
-        d.addErrback(log.msg, spider=spider)
-        return d
 
     def _handle_downloader_output(self, response, request, spider):
         assert isinstance(response, (Request, Response, Failure)), response

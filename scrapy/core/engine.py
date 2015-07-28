@@ -17,7 +17,7 @@ from scrapy.exceptions import DontCloseSpider, ScrapyDeprecationWarning
 from scrapy.http import Response, Request
 from scrapy.utils.misc import load_object
 from scrapy.utils.reactor import CallLaterOnce
-
+from functools import partial
 
 class Slot(object):
 
@@ -130,9 +130,8 @@ class ExecutionEngine(object):
             or self.scraper.slot.needs_backout()
 
 
-    def _next_request_from_scheduler(self, spider):
-
-        def _call_download(request):
+    def _call_download(request, spider=None):
+        if request:
             d = self._download(request, spider)
             d.addBoth(self._handle_downloader_output, request, spider)
             d.addErrback(lambda f: logger.info('Error while handling downloader output',
@@ -146,33 +145,15 @@ class ExecutionEngine(object):
             d.addErrback(lambda f: logger.info('Error while scheduling new request',
                                                exc_info=failure_to_exc_info(f),
                                                extra={'spider': spider}))
-        return defer.DeferredList([d1, d])
+            return d
+        else:
+            return request
 
-
-
-            
-            d = self._download(request, spider)
-            d.addBoth(self._handle_downloader_output, request, spider)
-            d.addErrback(log.msg, spider=spider)
-            d.addBoth(lambda _: slot.remove_request(request))
-            d.addErrback(log.msg, spider=spider)
-            d.addBoth(lambda _: slot.nextcall.schedule())
-            d.addErrback(log.msg, spider=spider)
-
-        
-        @defer.inlineCallbacks
-        def _call_scheduler_next_request(slot):
-            try:
-                request = yield slot.scheduler.next_request()
-                if not request:
-                    defer.returnValue(None)
-                defer.returnValue(_call_download(request))
-            except Exception as e:
-                raise e
-
- 
-        return _call_scheduler_next_request(self.slot)
-
+    def _next_request_from_scheduler(self, spider):
+        d = self.schedule.next_request()
+        _callback_partial = partial(self._call_download, spider=spider)
+        d.addCallback(self._callback_partial)
+        return d
 
     def _handle_downloader_output(self, response, request, spider):
         assert isinstance(response, (Request, Response, Failure)), response

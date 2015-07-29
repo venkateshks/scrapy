@@ -94,6 +94,7 @@ class ExecutionEngine(object):
         """Resume the execution engine"""
         self.paused = False
 
+    @defer.inlineCallbacks
     def _next_request(self, spider):
         slot = self.slot
         if not slot:
@@ -103,24 +104,26 @@ class ExecutionEngine(object):
             slot.nextcall.schedule(5)
             return
 
-        while not self._needs_backout(spider):
-            if not self._next_request_from_scheduler(spider):
-                break
-
-        if slot.start_requests and not self._needs_backout(spider):
-            try:
-                request = next(slot.start_requests)
-            except StopIteration:
-                slot.start_requests = None
-            except Exception as exc:
-                slot.start_requests = None
-                log.err(None, 'Obtaining request from start requests', \
-                        spider=spider)
-            else:
-                self.crawl(request, spider)
-
-        if self.spider_is_idle(spider) and slot.close_if_idle:
-            self._spider_idle(spider)
+        try:
+            while not self._needs_backout(spider):
+                next_req = yield self._next_request_from_scheduler(spider)
+                if not next_req:
+                    break
+            if slot.start_requests and not self._needs_backout(spider):
+                try:
+                    request = next(slot.start_requests)
+                except StopIteration:
+                    slot.start_requests = None
+                except Exception as exc:
+                    slot.start_requests = None
+                    log.err(None, 'Obtaining request from start requests', \
+                            spider=spider)
+                else:
+                    yield self.crawl(request, spider)
+            if self.spider_is_idle(spider) and slot.close_if_idle:
+                self._spider_idle(spider)
+        except Exception as e:
+            log.err(str(e), spider=spider)
 
     def _needs_backout(self, spider):
         slot = self.slot
@@ -130,30 +133,44 @@ class ExecutionEngine(object):
             or self.scraper.slot.needs_backout()
 
 
-    def _call_download(request, spider=None):
+    def _call_download(self, request, spider=None):
         if request:
+            slot = self.slot
             d = self._download(request, spider)
             d.addBoth(self._handle_downloader_output, request, spider)
-            d.addErrback(lambda f: logger.info('Error while handling downloader output',
-                                               exc_info=failure_to_exc_info(f),
+            d.addErrback(lambda f: log.err('Error while handling downloader output',
                                                extra={'spider': spider}))
             d.addBoth(lambda _: slot.remove_request(request))
-            d.addErrback(lambda f: logger.info('Error while removing request from slot',
-                                               exc_info=failure_to_exc_info(f),
+            d.addErrback(lambda f: log.err('Error while removing request from slot',
                                                extra={'spider': spider}))
             d.addBoth(lambda _: slot.nextcall.schedule())
-            d.addErrback(lambda f: logger.info('Error while scheduling new request',
-                                               exc_info=failure_to_exc_info(f),
-                                               extra={'spider': spider}))
+            d.addErrback(lambda f: log.err('Error while scheduling new request',
+                                           extra={'spider': spider}))
             return d
         else:
             return request
 
     def _next_request_from_scheduler(self, spider):
-        d = self.schedule.next_request()
+        d = self.slot.scheduler.next_request()
         _callback_partial = partial(self._call_download, spider=spider)
-        d.addCallback(self._callback_partial)
+        d.addCallback(_callback_partial)
         return d
+
+    @defer.inlineCallbacks
+    def _next_request_from_scheduler_inline(self, spider):
+        slot = self.slot
+        try:
+            request = yield slot.scheduler.next_request()
+            if not request:
+                return
+            response = yield self._download(request, spider)
+            yield self._handle_downloader_output(response, request, spider)
+            ret = yield slot.nextcall.schedule()
+            defer.returnValue(ret)
+        except Exception as e:
+            log.err(str(e), spider=spider)
+            slot.nextcall.schedule()
+
 
     def _handle_downloader_output(self, response, request, spider):
         assert isinstance(response, (Request, Response, Failure)), response
@@ -182,16 +199,25 @@ class ExecutionEngine(object):
         """Does the engine have capacity to handle more spiders"""
         return not bool(self.slot)
 
+    @defer.inlineCallbacks
     def crawl(self, request, spider):
         assert spider in self.open_spiders, \
             "Spider %r not opened when crawling: %s" % (spider.name, request)
-        self.schedule(request, spider)
-        self.slot.nextcall.schedule()
+        try:
+            yield self.schedule(request, spider)
+            yield self.slot.nextcall.schedule()
+        except Exception as e:
+            log.err(str(e), spider=spider)
 
+    @defer.inlineCallbacks
     def schedule(self, request, spider):
         self.signals.send_catch_log(signal=signals.request_scheduled,
                 request=request, spider=spider)
-        return self.slot.scheduler.enqueue_request(request)
+        try:
+            ret_val = yield self.slot.scheduler.enqueue_request(request)
+            defer.returnValue(ret_val)
+        except Exception as e:
+            log.err(str(e), spider=spider)
 
     def download(self, request, spider):
         slot = self.slot
